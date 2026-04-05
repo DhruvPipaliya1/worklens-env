@@ -1,12 +1,3 @@
----
-title: WorkLens Env
-emoji: 🔍
-colorFrom: blue
-colorTo: purple
-sdk: docker
-pinned: false
----
-
 # WorkLens Environment
 
 **Hint-driven developer task logging RL environment**
@@ -17,7 +8,15 @@ Built for the Meta PyTorch × OpenEnv Hackathon.
 
 ## The Problem
 
-Developers waste 15–30 minutes every day manually logging what they worked on into Jira or Azure DevOps. They have to remember exact times, write descriptions, and find the right tickets — all from memory at the end of a long day.
+Whenever a task is assigned to a developer, they work on it throughout the day — writing code, fixing bugs, attending meetings, reviewing pull requests, updating configurations, and much more. At the end of the day, they are expected to remember exactly when each task started, when it ended, and write a meaningful description of what they did — then manually submit all of this into their team's task tracking system.
+
+This is genuinely painful. A developer might context-switch between five different tasks in a single day. By 6 PM, remembering that a specific SQL query fix happened at 2:30 PM and took 45 minutes — and then writing a clear description of what changed and why — requires mental effort that has nothing to do with actual engineering work.
+
+WorkLens solves this by training an AI agent that passively observes all developer activity throughout the day — every git commit, every file change, every Jira update, every meeting attended, every Slack discussion. The agent continuously collects these signals in the background. At the end of the day, the developer simply gives a short natural language hint about what they want to log:
+
+> *"updated the SQL queries for the users table"*
+
+The agent then searches through everything it observed, finds the relevant evidence, and automatically generates a complete task entry with the correct time, duration, and a meaningful description — ready to submit. If multiple matching activities exist, it asks the developer a quick clarifying question rather than guessing. The developer stays in control with minimal effort.
 
 ## The Solution
 
