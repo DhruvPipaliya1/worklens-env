@@ -1,0 +1,218 @@
+spec_version: "1"
+
+name: worklens-env
+version: "1.0.0"
+description: >
+  Hint-driven developer task logging RL environment.
+  A developer gives a short natural-language hint about work they did
+  (e.g. "updated SQL queries"). The agent searches simulated workday
+  artifacts — git commits, Jira tickets, meetings, Slack messages —
+  and logs only the relevant task entries. Supports easy/medium/hard
+  difficulty with partial reward signals throughout the episode.
+
+type: environment
+
+runtime:
+  type: docker
+  dockerfile: server/Dockerfile
+
+app:
+  port: 7860
+  health_check: /health
+  endpoints:
+    reset: POST /reset
+    step:  POST /step
+    state: GET  /state/{session_id}
+    info:  GET  /info
+
+tasks:
+  - id: easy_single_match
+    difficulty: easy
+    score_range: [0.0, 1.0]
+    description: >
+      Developer hints "fixed the login bug". One clear git commit
+      matches. Agent must search, identify the match, and log a
+      precise task entry with correct time and description.
+
+  - id: medium_multi_match
+    difficulty: medium
+    score_range: [0.0, 1.0]
+    description: >
+      Developer hints "updated SQL queries". Three SQL commits exist
+      across different tables. Agent must show the user a list and
+      log only the ones the user selects — not all three.
+
+  - id: hard_ambiguous_hint
+    difficulty: hard
+    score_range: [0.0, 1.0]
+    description: >
+      Developer hints "worked on the dashboard". Eight-plus artifacts
+      match across frontend and backend. Agent must ask a narrowing
+      question, filter results, and log only the backend tasks.
+
+observation_space:
+  type: dict
+  fields:
+    - name: user_hint
+      type: string
+      description: Developer's natural language hint
+
+    - name: git_commits
+      type: list[GitCommit]
+      description: All git commits from the simulated workday
+
+    - name: file_changes
+      type: list[FileChange]
+      description: Files modified during the workday
+
+    - name: jira_items
+      type: list[JiraItem]
+      description: Jira tickets touched today
+
+    - name: azure_logs
+      type: list[AzureLog]
+      description: Azure DevOps work items
+
+    - name: meetings
+      type: list[Meeting]
+      description: Calendar meetings attended
+
+    - name: slack_messages
+      type: list[SlackMessage]
+      description: Slack/Teams message threads
+
+    - name: matches_found
+      type: list[MatchItem]
+      description: Search results after SEARCH action
+
+    - name: match_count
+      type: int
+      description: Number of matches found
+
+    - name: pending_question
+      type: string
+      description: Narrowing question agent asked user
+
+    - name: user_answer
+      type: string
+      description: User's reply to narrowing question
+
+    - name: logged_entries
+      type: list[TaskEntry]
+      description: Task entries logged so far this episode
+
+    - name: step_count
+      type: int
+      description: Current step number
+
+    - name: max_steps
+      type: int
+      description: Maximum steps allowed
+
+    - name: episode_done
+      type: bool
+      description: Whether the episode has ended
+
+    - name: last_action_result
+      type: string
+      description: Human-readable feedback on last action
+
+action_space:
+  type: discrete
+  actions:
+    - name: SEARCH
+      description: Search all workday sources for items matching the hint
+      parameters:
+        - name: hint
+          type: string
+          required: false
+
+    - name: AUTO_LOG
+      description: Directly log single unambiguous match (only when match_count == 1)
+      parameters:
+        - name: task_entry
+          type: TaskEntry
+          required: true
+
+    - name: SHOW_LIST
+      description: Present matched items to user for selection
+      parameters: []
+
+    - name: ASK_QUESTION
+      description: Ask user a narrowing question to filter matches
+      parameters:
+        - name: question
+          type: string
+          required: true
+
+    - name: MULTI_SELECT
+      description: Select specific items by index from match list
+      parameters:
+        - name: selected_indices
+          type: list[int]
+          required: true
+
+    - name: GENERATE_DESC
+      description: Generate a task description from selected evidence
+      parameters:
+        - name: source_ids
+          type: list[string]
+          required: true
+
+    - name: LOG_ENTRY
+      description: Submit final task entry to Jira/Azure
+      parameters:
+        - name: task_entry
+          type: TaskEntry
+          required: true
+
+    - name: SKIP
+      description: Nothing found — end episode with no log
+      parameters:
+        - name: skip_reason
+          type: string
+          required: false
+
+reward:
+  range: [0.0, 1.0]
+  frequency: per_step
+  terminal: true
+  components:
+    accuracy:
+      weight: 0.70
+      description: >
+        Logged the right tasks with correct titles, descriptions,
+        timestamps, and source references. Partial credit for
+        close-but-not-perfect entries.
+
+    efficiency:
+      weight: 0.20
+      description: >
+        Resolved episode in minimal steps and clarification rounds.
+        Easy ideal is 4 steps, medium 6, hard 8.
+
+    privacy:
+      weight: 0.10
+      description: >
+        Did not log tasks the user did not ask for.
+        Each unwanted entry costs 0.3 points.
+
+environment_variables:
+  - name: API_BASE_URL
+    description: LLM API endpoint for baseline inference
+    required: false
+    default: https://api.openai.com/v1
+
+  - name: API_KEY
+    description: API key for LLM inference
+    required: false
+
+  - name: MODEL_NAME
+    description: LLM model identifier
+    required: false
+    default: gpt-4o-mini
+
+  - name: PORT
+    description: Server port
+    required: false
+    default: "7860"
