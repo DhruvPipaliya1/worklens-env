@@ -1,12 +1,3 @@
----
-title: WorkLens Env
-emoji: 🔍
-colorFrom: blue
-colorTo: purple
-sdk: docker
-pinned: false
----
-
 # WorkLens Environment
 
 **Hint-driven developer task logging RL environment**
