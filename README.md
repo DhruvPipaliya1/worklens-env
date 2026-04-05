@@ -2,7 +2,7 @@
 
 **Hint-driven developer task logging RL environment**
 
-Built for the Meta PyTorch × OpenEnv Hackathon.
+Built for the Meta OpenEnv Hackathon.
 
 ---
 
