@@ -196,7 +196,7 @@ python worklens_env/baseline/inference.py \
   --all-difficulties
 
 # LLM agent (Groq free tier)
-export API_KEY=gsk_your_groq_key
+export HF_TOKEN=gsk_your_groq_key
 export API_BASE_URL=https://api.groq.com/openai/v1
 export MODEL_NAME=llama3-8b-8192
 
@@ -224,19 +224,18 @@ worklens_env/
 ├── __init__.py
 ├── models.py              # Pydantic models — Action, Observation, State
 ├── client.py              # Python client for training code
+├── inference.py           # Baseline LLM + rule agents
 ├── openenv.yaml           # Environment manifest
 ├── README.md
-├── server/
-│   ├── __init__.py
-│   ├── app.py             # FastAPI server
-│   ├── worklens_environment.py  # reset() / step() / state()
-│   ├── data_generator.py  # Synthetic workday generator
-│   ├── graders.py         # Reward function
-│   ├── requirements.txt
-│   └── Dockerfile
-└── baseline/
+└── server/
     ├── __init__.py
-    └── inference.py       # Baseline LLM + rule agents
+    ├── app.py                   # FastAPI server
+    ├── worklens_environment.py  # reset() / step() / state()
+    ├── data_generator.py        # Synthetic workday generator
+    ├── graders.py               # Reward function
+    ├── requirements.txt
+    └── Dockerfile
+
 ```
 
 ---
@@ -246,7 +245,7 @@ worklens_env/
 | Variable | Description | Default |
 |---|---|---|
 | `API_BASE_URL` | LLM API endpoint | `https://api.openai.com/v1` |
-| `API_KEY` | LLM API key | — |
+| `HF_TOKEN` | LLM API key | — |
 | `MODEL_NAME` | LLM model name | `gpt-4o-mini` |
 | `PORT` | Server port | `7860` |
 

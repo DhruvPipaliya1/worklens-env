@@ -107,25 +107,31 @@ def _http_get(url: str) -> dict:
 
 # ── LLM agent ─────────────────────────────────────────────────
 SYSTEM_PROMPT = textwrap.dedent("""
-You are a WorkLens agent. A developer gives you a short hint about work they did today.
-Your job: search workday artifacts and log ONLY the relevant task entries.
+You are a WorkLens agent. A developer gives a short hint about work they did today.
+Your job: find the relevant artifacts and log each matching task as a SEPARATE LOG_ENTRY.
 
-RULES:
-1. Always SEARCH first.
-2. 1 match → LOG_ENTRY directly.
-3. 2-4 matches → SHOW_LIST first.
-4. 5+ matches → ASK_QUESTION to narrow down.
-5. Never log tasks user did not ask for.
-6. LOG_ENTRY needs: title, description (>15 words), start_time HH:MM, end_time HH:MM, source_ids.
+STRICT RULES:
+1. Always SEARCH first — use the developer hint as the search term.
+2. After SEARCH: if 1 match → LOG_ENTRY. If 2-4 matches → SHOW_LIST. If 5+ → ASK_QUESTION first.
+3. After SHOW_LIST: the user has selected items. Log EACH selected item as a SEPARATE LOG_ENTRY call.
+   Do NOT search again. Do NOT show list again. Just LOG_ENTRY for each selected item one at a time.
+4. After ASK_QUESTION: call SHOW_LIST to present filtered results, then LOG_ENTRY each selected item.
+5. NEVER search twice. NEVER show list twice. NEVER log items user did not select.
+6. SKIP only if truly nothing matches.
+7. Each LOG_ENTRY must have: title, description (minimum 15 words explaining what was done),
+   start_time HH:MM (from file change timestamp), end_time HH:MM (from commit timestamp), source_ids.
 
-Respond ONLY with valid JSON. No explanation outside JSON.
+IMPORTANT: If LAST RESULT says "User selected 2" items — you must call LOG_ENTRY TWICE, once per item.
+Check "ALREADY LOGGED" count vs total selected. Keep logging until all selected items are logged.
+
+Respond ONLY with valid JSON. No text outside JSON.
 
 Examples:
 {"action_type": "SEARCH", "hint": "updated SQL queries"}
 {"action_type": "SHOW_LIST"}
 {"action_type": "ASK_QUESTION", "question": "Was this frontend or backend work?"}
-{"action_type": "LOG_ENTRY", "task_entry": {"title": "Fix login bug", "description": "Resolved session expiry in auth.py causing login timeouts after 30 min.", "start_time": "11:20", "end_time": "11:35", "source_ids": ["abc123", "PROJ-88"], "project": "PROJ", "tags": ["bugfix"]}}
-{"action_type": "SKIP", "skip_reason": "No matching artifacts found."}
+{"action_type": "LOG_ENTRY", "task_entry": {"title": "Fix login timeout bug", "description": "Resolved session expiry issue in auth.py and session.py causing login timeouts after 30 minutes of inactivity.", "start_time": "11:20", "end_time": "11:35", "source_ids": ["abc123", "PROJ-88"], "project": "PROJ", "tags": ["bugfix", "auth"]}}
+{"action_type": "SKIP", "skip_reason": "No matching artifacts found for this hint."}
 """).strip()
 
 
@@ -155,7 +161,13 @@ def get_llm_action(client: OpenAI, obs: dict, history: list) -> dict:
         lines.append(f"YOU ASKED: \"{obs['pending_question']}\"")
         lines.append(f"USER SAID: \"{obs['user_answer']}\"")
     if obs.get("logged_entries"):
-        lines.append(f"ALREADY LOGGED: {len(obs['logged_entries'])} entries")
+        lines.append(f"ALREADY LOGGED: {len(obs['logged_entries'])} entries so far")
+    if obs.get("matches_found") and not obs.get("logged_entries"):
+        lines.append(f"ACTION NEEDED: Log each of the {len(obs['matches_found'])} selected item(s) with LOG_ENTRY")
+    if obs.get("matches_found") and obs.get("logged_entries"):
+        remaining = len(obs["matches_found"]) - len(obs["logged_entries"])
+        if remaining > 0:
+            lines.append(f"ACTION NEEDED: Still need to log {remaining} more item(s) with LOG_ENTRY")
     if obs.get("last_action_result"):
         lines.append(f"LAST RESULT: {obs['last_action_result']}")
     if obs.get("error_message"):
