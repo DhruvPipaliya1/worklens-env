@@ -59,7 +59,7 @@ uvicorn worklens_env.server.app:app --host 0.0.0.0 --port 7860
 curl http://localhost:7860/health
 
 # Run baseline agent
-python worklens_env/baseline/inference.py --url http://localhost:7860 --all-difficulties
+python worklens_env/inference.py --url http://localhost:7860 --all-difficulties
 ```
 
 ---
