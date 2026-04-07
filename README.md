@@ -227,14 +227,14 @@ worklens_env/
 ├── inference.py           # Baseline LLM + rule agents
 ├── openenv.yaml           # Environment manifest
 ├── README.md
+├── Dockerfile
 └── server/
     ├── __init__.py
     ├── app.py                   # FastAPI server
     ├── worklens_environment.py  # reset() / step() / state()
     ├── data_generator.py        # Synthetic workday generator
     ├── graders.py               # Reward function
-    ├── requirements.txt
-    └── Dockerfile
+    └── requirements.txt
 
 ```
 

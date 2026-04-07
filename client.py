@@ -7,24 +7,6 @@ Supports three connection modes:
     1. Live URL     → connect to a deployed HuggingFace Space
     2. Local server → connect to uvicorn running locally
     3. In-process   → spin up the env directly (no server needed)
-
-Usage
------
-# Mode 1 — HuggingFace Space
-with WorkLensEnv(base_url="https://yourname-worklens-env.hf.space") as env:
-    obs = env.reset(difficulty="medium")
-    while not obs.episode_done:
-        action = agent.predict(obs)
-        result = env.step(action)
-        obs    = result.observation
-
-# Mode 2 — local server
-with WorkLensEnv(base_url="http://localhost:7860") as env:
-    obs = env.reset()
-
-# Mode 3 — in-process (fastest, for local dev)
-with WorkLensEnv.in_process() as env:
-    obs = env.reset()
 """
 
 from __future__ import annotations

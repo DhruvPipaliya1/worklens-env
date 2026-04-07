@@ -7,7 +7,7 @@ MANDATORY ENVIRONMENT VARIABLES:
     API_BASE_URL      LLM API endpoint
     MODEL_NAME        Model identifier
     HF_TOKEN          HuggingFace / API key
-    SPACE_URL         Your HF Space URL (e.g. https://yourname-worklens-env.hf.space)
+    SPACE_URL         Your HF Space URL (e.g. https://worklens-env.hf.space)
 
 STDOUT FORMAT (strictly followed):
     [START] task=<task_name> env=worklens-env model=<model_name>
