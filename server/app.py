@@ -75,9 +75,9 @@ def _get_env(session_id: str) -> WorkLensEnvironment:
 # ---------------------------------------------------------------------------
 
 class ResetRequest(BaseModel):
-    difficulty : str         = "easy"   # "easy" | "medium" | "hard"
-    seed       : int         = 42
-    session_id : Optional[str] = None   # pass to reuse a session slot
+    difficulty : Optional[str] = "easy"   # "easy" | "medium" | "hard"
+    seed       : Optional[int] = 42
+    session_id : Optional[str] = None    # pass to reuse a session slot
 
 
 class ResetResponse(BaseModel):
@@ -199,7 +199,9 @@ def info():
 
 
 @app.post("/reset", response_model=ResetResponse)
-def reset(req: ResetRequest):
+def reset(req: Optional[ResetRequest] = None):
+    if req is None:
+        req = ResetRequest()
     """
     Start a new episode.
 
