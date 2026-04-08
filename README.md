@@ -228,6 +228,7 @@ worklens_env/
 ├── openenv.yaml           # Environment manifest
 ├── README.md
 ├── Dockerfile
+├── pyproject.toml
 ├── requirements.txt
 └── server/
     ├── __init__.py
