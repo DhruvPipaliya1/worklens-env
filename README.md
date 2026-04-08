@@ -228,13 +228,13 @@ worklens_env/
 ├── openenv.yaml           # Environment manifest
 ├── README.md
 ├── Dockerfile
+├── requirements.txt
 └── server/
     ├── __init__.py
     ├── app.py                   # FastAPI server
     ├── worklens_environment.py  # reset() / step() / state()
     ├── data_generator.py        # Synthetic workday generator
-    ├── graders.py               # Reward function
-    └── requirements.txt
+    └── graders.py               # Reward function
 
 ```
 
