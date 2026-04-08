@@ -9,6 +9,7 @@ description = "Hint-driven developer task logging RL environment"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "openenv-core>=0.2.0",
     "fastapi>=0.115.0",
     "uvicorn>=0.30.6",
     "pydantic>=2.7.4",
@@ -22,5 +23,8 @@ dev = [
     "httpx>=0.24.0",
 ]
 
+[project.scripts]
+server = "worklens_env.server.app:app"
+ 
 [tool.hatch.build.targets.wheel]
 packages = ["."]
