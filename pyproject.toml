@@ -24,7 +24,7 @@ dev = [
 ]
 
 [project.scripts]
-server = "worklens_env.server.app:app"
+server = "worklens_env.server.app:main"
  
 [tool.hatch.build.targets.wheel]
 packages = ["."]
