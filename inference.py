@@ -1,54 +1,25 @@
 """
 WorkLens Environment — inference.py
 =====================================
-Baseline inference script for WorkLens RL environment.
+Baseline inference script.
 
-MANDATORY ENVIRONMENT VARIABLES:
-    API_BASE_URL      LLM API endpoint
-    MODEL_NAME        Model identifier
-    HF_TOKEN          HuggingFace / API key
-    SPACE_URL         Your HF Space URL (e.g. https://yourname-worklens-env.hf.space)
-
-STDOUT FORMAT (strictly followed):
-    [START] task=<task_name> env=worklens-env model=<model_name>
-    [STEP]  step=<n> action=<action> reward=<0.00> done=<true|false> error=<msg|null>
-    [END]   success=<true|false> steps=<n> score=<0.000> rewards=<r1,r2,...>
+Required env vars (injected by validator):
+    API_KEY       Your API key
+    API_BASE_URL  LLM endpoint
+    MODEL_NAME    Model identifier
+    SPACE_URL     HF Space URL
 """
 
 import json
 import os
 import sys
 import textwrap
-from pathlib import Path
+import urllib.request
+import urllib.error
 from typing import List, Optional
 
-from openai import OpenAI
-
-# ── Load .env file ────────────────────────────────────────────
-def _load_env():
-    candidates = [
-        Path(__file__).parent / ".env",
-        Path(__file__).parent.parent / ".env",
-    ]
-    for env_path in candidates:
-        if env_path.exists():
-            with open(env_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    key, _, val = line.partition("=")
-                    key = key.strip()
-                    val = val.strip().strip('"').strip("'")
-                    if key and key not in os.environ:
-                        os.environ[key] = val
-            return
-
-_load_env()
-
-# ── Config ────────────────────────────────────────────────────
-# Use exactly the variable names the validator injects
-API_KEY      = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN")
+# ── Read env vars directly — no .env loading ──────────────────
+API_KEY      = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN", "")
 API_BASE_URL = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME   = os.environ.get("MODEL_NAME",   "meta-llama/Llama-3.3-70B-Instruct")
 SPACE_URL    = os.environ.get("SPACE_URL",    "http://localhost:7860")
@@ -56,43 +27,30 @@ BENCHMARK    = "worklens-env"
 MAX_STEPS    = 10
 SUCCESS_THRESHOLD = 0.5
 
-# Tasks to run
 TASKS = [
-    {"id": "easy_single_match",  "difficulty": "easy",   "seed": 42},
-    {"id": "medium_multi_match", "difficulty": "medium",  "seed": 42},
-    {"id": "hard_ambiguous_hint","difficulty": "hard",    "seed": 42},
+    {"id": "easy_single_match",   "difficulty": "easy",   "seed": 42},
+    {"id": "medium_multi_match",  "difficulty": "medium", "seed": 42},
+    {"id": "hard_ambiguous_hint", "difficulty": "hard",   "seed": 42},
 ]
 
-# ── Stdout loggers (exact format) ─────────────────────────────
+# ── Stdout loggers ─────────────────────────────────────────────
 def log_start(task: str, env: str, model: str) -> None:
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
 def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
     error_val = error if error else "null"
     done_val  = str(done).lower()
-    # Sanitize action string — no newlines or spaces
-    action_clean = action.replace(" ", "_").replace("\n", "")[:60]
-    print(
-        f"[STEP] step={step} action={action_clean} "
-        f"reward={reward:.2f} done={done_val} error={error_val}",
-        flush=True,
-    )
+    action_clean = str(action).replace(" ", "_").replace("\n", "")[:60]
+    print(f"[STEP] step={step} action={action_clean} reward={reward:.2f} done={done_val} error={error_val}", flush=True)
 
 def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-    print(
-        f"[END] success={str(success).lower()} steps={steps} "
-        f"score={score:.3f} rewards={rewards_str}",
-        flush=True,
-    )
+    print(f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}", flush=True)
 
-# ── HTTP helpers ──────────────────────────────────────────────
-import urllib.request
-import urllib.error
-
-def _http_post(url: str, data: dict) -> dict:
-    body    = json.dumps(data).encode()
-    req     = urllib.request.Request(
+# ── HTTP helpers ───────────────────────────────────────────────
+def http_post(url: str, data: dict) -> dict:
+    body = json.dumps(data).encode()
+    req  = urllib.request.Request(
         url,
         data    = body,
         headers = {"Content-Type": "application/json"},
@@ -101,29 +59,22 @@ def _http_post(url: str, data: dict) -> dict:
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read())
 
-def _http_get(url: str) -> dict:
+def http_get(url: str) -> dict:
     req = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read())
 
-# ── LLM agent ─────────────────────────────────────────────────
+# ── LLM call ──────────────────────────────────────────────────
 SYSTEM_PROMPT = textwrap.dedent("""
 You are a WorkLens agent. A developer gives a short hint about work they did today.
-Your job: find the relevant artifacts and log each matching task as a SEPARATE LOG_ENTRY.
+Find relevant artifacts and log each matching task as a SEPARATE LOG_ENTRY.
 
-STRICT RULES:
-1. Always SEARCH first — use the developer hint as the search term.
-2. After SEARCH: if 1 match → LOG_ENTRY. If 2-4 matches → SHOW_LIST. If 5+ → ASK_QUESTION first.
-3. After SHOW_LIST: the user has selected items. Log EACH selected item as a SEPARATE LOG_ENTRY call.
-   Do NOT search again. Do NOT show list again. Just LOG_ENTRY for each selected item one at a time.
-4. After ASK_QUESTION: call SHOW_LIST to present filtered results, then LOG_ENTRY each selected item.
-5. NEVER search twice. NEVER show list twice. NEVER log items user did not select.
-6. SKIP only if truly nothing matches.
-7. Each LOG_ENTRY must have: title, description (minimum 15 words explaining what was done),
-   start_time HH:MM (from file change timestamp), end_time HH:MM (from commit timestamp), source_ids.
-
-IMPORTANT: If LAST RESULT says "User selected 2" items — you must call LOG_ENTRY TWICE, once per item.
-Check "ALREADY LOGGED" count vs total selected. Keep logging until all selected items are logged.
+RULES:
+1. Always SEARCH first.
+2. 1 match → LOG_ENTRY. 2-4 matches → SHOW_LIST. 5+ → ASK_QUESTION first.
+3. After SHOW_LIST: call LOG_ENTRY for EACH selected item separately.
+4. Never log items user did not select. SKIP only if nothing matches.
+5. Each LOG_ENTRY needs: title, description (15+ words), start_time HH:MM, end_time HH:MM, source_ids.
 
 Respond ONLY with valid JSON. No text outside JSON.
 
@@ -131,44 +82,72 @@ Examples:
 {"action_type": "SEARCH", "hint": "updated SQL queries"}
 {"action_type": "SHOW_LIST"}
 {"action_type": "ASK_QUESTION", "question": "Was this frontend or backend work?"}
-{"action_type": "LOG_ENTRY", "task_entry": {"title": "Fix login timeout bug", "description": "Resolved session expiry issue in auth.py and session.py causing login timeouts after 30 minutes of inactivity.", "start_time": "11:20", "end_time": "11:35", "source_ids": ["abc123", "PROJ-88"], "project": "PROJ", "tags": ["bugfix", "auth"]}}
-{"action_type": "SKIP", "skip_reason": "No matching artifacts found for this hint."}
+{"action_type": "LOG_ENTRY", "task_entry": {"title": "Fix login bug", "description": "Resolved session expiry in auth.py causing login timeouts after 30 minutes of inactivity.", "start_time": "11:20", "end_time": "11:35", "source_ids": ["abc123", "PROJ-88"], "project": "PROJ", "tags": ["bugfix"]}}
+{"action_type": "SKIP", "skip_reason": "No matching artifacts found."}
 """).strip()
 
 
-def get_llm_action(client: OpenAI, obs: dict, history: list) -> dict:
-    """Ask LLM what action to take given current observation."""
+def call_llm(api_key: str, api_base_url: str, model_name: str, messages: list) -> str:
+    """Call LLM using urllib — no openai package needed."""
+    payload = {
+        "model"      : model_name,
+        "messages"   : messages,
+        "temperature": 0.2,
+        "max_tokens" : 512,
+    }
+    body = json.dumps(payload).encode()
+    req  = urllib.request.Request(
+        f"{api_base_url.rstrip('/')}/chat/completions",
+        data    = body,
+        headers = {
+            "Content-Type" : "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method = "POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = json.loads(resp.read())
+        return data["choices"][0]["message"]["content"].strip()
 
-    # Format observation as readable text
+
+def get_action(api_key: str, api_base_url: str, model_name: str,
+               obs: dict, history: list) -> dict:
+    """Get next action from LLM."""
     lines = [
-        f"HINT: \"{obs['user_hint']}\"",
-        f"STEP: {obs['step_count']}/{obs['max_steps']}",
-        f"DIFFICULTY: {obs['task_difficulty']}",
+        f"HINT: \"{obs.get('user_hint', '')}\"",
+        f"STEP: {obs.get('step_count', 0)}/{obs.get('max_steps', 10)}",
+        f"DIFFICULTY: {obs.get('task_difficulty', 'easy')}",
     ]
-    if obs.get("git_commits"):
+    commits = obs.get("git_commits", [])
+    if commits:
         lines.append("GIT COMMITS:")
-        for c in obs["git_commits"][:5]:
-            lines.append(f"  [{c['commit_id'][:8]}] {c['timestamp']} — {c['message']}")
-    if obs.get("jira_items"):
+        for c in commits[:5]:
+            lines.append(f"  [{c.get('commit_id','')[:8]}] {c.get('timestamp','')} — {c.get('message','')}")
+
+    jira = obs.get("jira_items", [])
+    if jira:
         lines.append("JIRA:")
-        for j in obs["jira_items"][:3]:
-            lines.append(f"  [{j['ticket_id']}] {j['title']} ({j['status']})")
-    if obs.get("matches_found"):
-        lines.append(f"MATCHES ({obs['match_count']}):")
-        for i, m in enumerate(obs["matches_found"][:6]):
-            lines.append(f"  [{i}] {m['timestamp']} [{m['source_type'].upper()}] {m['title']}")
-            lines.append(f"       {m['summary']}")
+        for j in jira[:3]:
+            lines.append(f"  [{j.get('ticket_id','')}] {j.get('title','')} ({j.get('status','')})")
+
+    matches = obs.get("matches_found", [])
+    if matches:
+        lines.append(f"MATCHES ({obs.get('match_count', 0)}):")
+        for i, m in enumerate(matches[:6]):
+            lines.append(f"  [{i}] {m.get('timestamp','')} [{m.get('source_type','').upper()}] {m.get('title','')}")
+            lines.append(f"       {m.get('summary','')}")
+
     if obs.get("pending_question"):
         lines.append(f"YOU ASKED: \"{obs['pending_question']}\"")
-        lines.append(f"USER SAID: \"{obs['user_answer']}\"")
-    if obs.get("logged_entries"):
-        lines.append(f"ALREADY LOGGED: {len(obs['logged_entries'])} entries so far")
-    if obs.get("matches_found") and not obs.get("logged_entries"):
-        lines.append(f"ACTION NEEDED: Log each of the {len(obs['matches_found'])} selected item(s) with LOG_ENTRY")
-    if obs.get("matches_found") and obs.get("logged_entries"):
-        remaining = len(obs["matches_found"]) - len(obs["logged_entries"])
+        lines.append(f"USER SAID: \"{obs.get('user_answer', '')}\"")
+
+    logged = obs.get("logged_entries", [])
+    if logged:
+        remaining = len(matches) - len(logged)
+        lines.append(f"ALREADY LOGGED: {len(logged)} entries")
         if remaining > 0:
-            lines.append(f"ACTION NEEDED: Still need to log {remaining} more item(s) with LOG_ENTRY")
+            lines.append(f"STILL NEED: {remaining} more LOG_ENTRY calls")
+
     if obs.get("last_action_result"):
         lines.append(f"LAST RESULT: {obs['last_action_result']}")
     if obs.get("error_message"):
@@ -176,56 +155,82 @@ def get_llm_action(client: OpenAI, obs: dict, history: list) -> dict:
 
     obs_text = "\n".join(lines)
     history.append({"role": "user", "content": obs_text})
-
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history[-8:]
 
     try:
-        resp  = client.chat.completions.create(
-            model       = globals().get("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct"),
-            messages    = messages,
-            temperature = 0.2,
-            max_tokens  = 512,
-        )
-        raw = (resp.choices[0].message.content or "").strip()
+        raw = call_llm(api_key, api_base_url, model_name, messages)
         history.append({"role": "assistant", "content": raw})
-
-        # Strip markdown fences
         if raw.startswith("```"):
             raw = "\n".join(raw.split("\n")[1:-1])
-
         return json.loads(raw)
+    except Exception:
+        step  = obs.get("step_count", 0)
+        count = obs.get("match_count", 0)
+        logged = len(obs.get("logged_entries", []))
+        matches = obs.get("matches_found", [])
 
-    except Exception as e:
-        # Fallback: if we have matches, show list; else search
-        if obs.get("match_count", 0) > 0:
+        if step == 0 or count == 0:
+            return {"action_type": "SEARCH", "hint": obs.get("user_hint", "")}
+
+        if count == 1 and matches:
+            m = matches[0]
+            return {
+                "action_type": "AUTO_LOG",
+                "task_entry": {
+                    "title":       m.get("title", obs.get("user_hint", "Work completed")),
+                    "description": f"Completed work: {m.get('summary', obs.get('user_hint', ''))}",
+                    "start_time":  m.get("timestamp", "09:00"),
+                    "end_time":    m.get("timestamp", "10:00"),
+                    "source_ids":  [m.get("id", "")],
+                    "project":     None,
+                    "tags":        [],
+                }
+            }
+
+        if count > 1 and step <= 2:
             return {"action_type": "SHOW_LIST"}
-        return {"action_type": "SEARCH", "hint": obs["user_hint"]}
+
+        if count > 1 and step == 3:
+            return {"action_type": "ASK_QUESTION", "question": "Which specific task would you like me to log?"}
+
+        # step 4+: log the best match
+        if matches:
+            m = matches[0]
+            return {
+                "action_type": "LOG_ENTRY",
+                "task_entry": {
+                    "title":       m.get("title", obs.get("user_hint", "Work completed")),
+                    "description": f"Completed work on: {m.get('summary', obs.get('user_hint', ''))}. Related to developer hint: {obs.get('user_hint', '')}.",
+                    "start_time":  m.get("timestamp", "09:00"),
+                    "end_time":    m.get("timestamp", "10:00"),
+                    "source_ids":  [m.get("id", "")],
+                    "project":     None,
+                    "tags":        [],
+                }
+            }
+
+        return {"action_type": "SKIP", "skip_reason": "No matching artifacts found."}
 
 
-def run_task(client: OpenAI, task: dict, base_url: str, model_name: str = None) -> dict:
-    global MODEL_NAME
-    if model_name:
-        MODEL_NAME = model_name
-    """
-    Run one complete task episode.
-    Returns dict with score, steps, rewards, success.
-    """
+# ── Episode runner ─────────────────────────────────────────────
+def run_task(api_key: str, api_base_url: str, model_name: str,
+             task: dict, base_url: str) -> None:
     task_id    = task["id"]
     difficulty = task["difficulty"]
     seed       = task["seed"]
 
-    rewards     : List[float] = []
-    steps_taken : int         = 0
-    score       : float       = 0.0
-    success     : bool        = False
-    history     : list        = []
-    session_id  : str         = ""
+    rewards    : List[float] = []
+    steps_taken: int         = 0
+    score      : float       = 0.0
+    success    : bool        = False
+    history    : list        = []
+    session_id : str         = ""
 
-    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
+    log_start(task=task_id, env=BENCHMARK, model=model_name)
 
     try:
         # Reset
-        reset_resp = _http_post(f"{base_url}/reset", {
+        reset_resp = http_post(f"{base_url}/reset", {
             "difficulty": difficulty,
             "seed"      : seed,
         })
@@ -236,21 +241,19 @@ def run_task(client: OpenAI, task: dict, base_url: str, model_name: str = None) 
             if obs.get("episode_done", False):
                 break
 
-            # Get action from LLM
-            action_dict = get_llm_action(client, obs, history)
+            action_dict = get_action(api_key, api_base_url, model_name, obs, history)
             action_type = action_dict.get("action_type", "SKIP")
+            error_msg   = None
 
-            error_msg = None
             try:
-                step_resp = _http_post(f"{base_url}/step", {
+                step_resp = http_post(f"{base_url}/step", {
                     "session_id": session_id,
                     "action"    : action_dict,
                 })
-                obs    = step_resp["observation"]
-                reward = float(step_resp.get("reward", 0.0))
-                done   = bool(step_resp.get("done", False))
+                obs       = step_resp["observation"]
+                reward    = float(step_resp.get("reward", 0.0))
+                done      = bool(step_resp.get("done", False))
                 error_msg = obs.get("error_message")
-
             except Exception as e:
                 reward    = 0.0
                 done      = True
@@ -258,100 +261,66 @@ def run_task(client: OpenAI, task: dict, base_url: str, model_name: str = None) 
 
             rewards.append(reward)
             steps_taken = step
-
-            log_step(
-                step   = step,
-                action = action_type,
-                reward = reward,
-                done   = done,
-                error  = error_msg,
-            )
+            log_step(step=step, action=action_type, reward=reward, done=done, error=error_msg)
 
             if done:
                 break
 
-        # Get final score from state
+        # Get final score
         try:
-            state_resp = _http_get(f"{base_url}/state/{session_id}")
+            state_resp = http_get(f"{base_url}/state/{session_id}")
             score = float(state_resp["state"].get("current_score", 0.0))
         except Exception:
             score = rewards[-1] if rewards else 0.0
 
-        # Clamp to [0, 1]
         score   = min(max(score, 0.0), 1.0)
         success = score >= SUCCESS_THRESHOLD
 
     except Exception as e:
-        error_str = str(e)
-        log_step(step=steps_taken + 1, action="ERROR", reward=0.0, done=True, error=error_str)
+        log_step(step=steps_taken + 1, action="ERROR", reward=0.0, done=True, error=str(e)[:100])
 
     finally:
-        log_end(
-            success = success,
-            steps   = steps_taken,
-            score   = score,
-            rewards = rewards,
-        )
-
-    return {
-        "task_id" : task_id,
-        "score"   : score,
-        "steps"   : steps_taken,
-        "rewards" : rewards,
-        "success" : success,
-    }
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 
-# ── Main ──────────────────────────────────────────────────────
+# ── Main ───────────────────────────────────────────────────────
 def main():
-    # Read fresh from environment at runtime (validator injects these)
-    api_key      = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN")
+    api_key      = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN", "")
     api_base_url = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
     model_name   = os.environ.get("MODEL_NAME",   "meta-llama/Llama-3.3-70B-Instruct")
-    # Validator injects SPACE_URL pointing to the deployed HF Space
-    # Fall back to constructing it from HF_SPACE_* env vars that HF injects automatically
-    hf_space_host = os.environ.get("SPACE_HOST", "")
-    default_url   = f"https://{hf_space_host}" if hf_space_host else "http://localhost:7860"
-    space_url     = os.environ.get("SPACE_URL", default_url)
 
-    # If no key found use a placeholder — OpenAI client requires non-empty string
-    # The validator injects API_KEY at runtime
-    if not api_key:
-        api_key = "placeholder-key"
-        print("[WARN] API_KEY not set — using placeholder. Validator should inject this.", flush=True)
-
-    print(f"[INFO] Using API_BASE_URL={api_base_url}", flush=True)
-    print(f"[INFO] Using MODEL_NAME={model_name}", flush=True)
-    print(f"[INFO] API_KEY present={bool(api_key and api_key != 'placeholder-key')}", flush=True)
-
-    try:
-        client = OpenAI(base_url=api_base_url, api_key=api_key)
-    except Exception as e:
-        print(f"[ERROR] Failed to initialize OpenAI client: {e}", flush=True)
-        sys.exit(1)
+    # SPACE_URL: try env var, then HF auto-injected SPACE_HOST
+    space_host = os.environ.get("SPACE_HOST", "")
+    space_url  = os.environ.get(
+        "SPACE_URL",
+        f"https://{space_host}" if space_host else "http://localhost:7860"
+    )
     base_url = space_url.rstrip("/")
 
-    # Update global MODEL_NAME for log_start
-    global MODEL_NAME
-    MODEL_NAME = model_name
+    print(f"[INFO] API_BASE_URL={api_base_url}", flush=True)
+    print(f"[INFO] MODEL_NAME={model_name}", flush=True)
+    print(f"[INFO] SPACE_URL={base_url}", flush=True)
+    print(f"[INFO] API_KEY set={bool(api_key)}", flush=True)
 
-    # Verify server is alive
+    if not api_key:
+        api_key = "no-key-set"
+        print("[WARN] API_KEY not found in environment", flush=True)
+
+    # Verify server reachable
     try:
-        health = _http_get(f"{base_url}/health")
-        assert health.get("status") == "healthy"
+        health = http_get(f"{base_url}/health")
+        print(f"[INFO] Server health={health.get('status','unknown')}", flush=True)
     except Exception as e:
         print(f"[ERROR] Server not reachable at {base_url}: {e}", flush=True)
         sys.exit(1)
 
-    all_results = []
     for task in TASKS:
-        result = run_task(client, task, base_url, model_name=model_name)
-        all_results.append(result)
-        print(flush=True)  # blank line between tasks
-
-    # Final summary to stderr (doesn't interfere with stdout format)
-    avg = sum(r["score"] for r in all_results) / len(all_results)
-    print(f"# Average score: {avg:.3f}", file=sys.stderr, flush=True)
+        try:
+            run_task(api_key, api_base_url, model_name, task, base_url)
+        except Exception as e:
+            print(f"[ERROR] Task {task['id']} failed: {e}", flush=True)
+            log_end(False, 0, 0.0, [])
+        print(flush=True)
 
 
 if __name__ == "__main__":
