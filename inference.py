@@ -1,21 +1,30 @@
 """
 WorkLens Environment — inference.py
 =====================================
-Robust inference script (Phase 2 safe)
+Baseline inference script for WorkLens RL environment.
 
-- Works WITH or WITHOUT API key
-- Never crashes
-- Always produces valid output
+MANDATORY ENVIRONMENT VARIABLES:
+    API_BASE_URL      LLM API endpoint
+    MODEL_NAME        Model identifier
+    HF_TOKEN          HuggingFace / API key
+    SPACE_URL         Your HF Space URL (e.g. https://yourname-worklens-env.hf.space)
+
+STDOUT FORMAT (strictly followed):
+    [START] task=<task_name> env=worklens-env model=<model_name>
+    [STEP]  step=<n> action=<action> reward=<0.00> done=<true|false> error=<msg|null>
+    [END]   success=<true|false> steps=<n> score=<0.000> rewards=<r1,r2,...>
 """
 
 import json
 import os
 import sys
+import textwrap
 from pathlib import Path
+from typing import List, Optional
 
 from openai import OpenAI
 
-# ── Load .env ────────────────────────────────────────────────
+# ── Load .env file ────────────────────────────────────────────
 def _load_env():
     candidates = [
         Path(__file__).parent / ".env",
@@ -37,333 +46,303 @@ def _load_env():
 
 _load_env()
 
-# ── Config ──────────────────────────────────────────────────
-API_KEY      = os.getenv("API_KEY")
-API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME   = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
-SPACE_URL    = os.getenv("SPACE_URL", "http://localhost:7860")
-
-BENCHMARK         = "worklens-env"
-MAX_STEPS         = 10
+# ── Config ────────────────────────────────────────────────────
+# Use exactly the variable names the validator injects
+API_KEY      = os.environ.get("API_KEY")
+API_BASE_URL = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME   = os.environ.get("MODEL_NAME",   "meta-llama/Llama-3.3-70B-Instruct")
+SPACE_URL    = os.environ.get("SPACE_URL",    "http://localhost:7860")
+BENCHMARK    = "worklens-env"
+MAX_STEPS    = 10
 SUCCESS_THRESHOLD = 0.5
 
+# Tasks to run
 TASKS = [
-    {"id": "easy_single_match",   "difficulty": "easy",   "seed": 42},
-    {"id": "medium_multi_match",  "difficulty": "medium", "seed": 42},
-    {"id": "hard_ambiguous_hint", "difficulty": "hard",   "seed": 42},
+    {"id": "easy_single_match",  "difficulty": "easy",   "seed": 42},
+    {"id": "medium_multi_match", "difficulty": "medium",  "seed": 42},
+    {"id": "hard_ambiguous_hint","difficulty": "hard",    "seed": 42},
 ]
 
-# ── Logging ─────────────────────────────────────────────────
-def log_start(task, env, model):
+# ── Stdout loggers (exact format) ─────────────────────────────
+def log_start(task: str, env: str, model: str) -> None:
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
-def log_step(step, action, reward, done, error):
-    error_val    = error if error else "null"
-    done_val     = str(done).lower()
-    action_clean = str(action).replace(" ", "_").replace("\n", "")[:60]
-    print(f"[STEP] step={step} action={action_clean} reward={reward:.2f} done={done_val} error={error_val}", flush=True)
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    error_val = error if error else "null"
+    done_val  = str(done).lower()
+    # Sanitize action string — no newlines or spaces
+    action_clean = action.replace(" ", "_").replace("\n", "")[:60]
+    print(
+        f"[STEP] step={step} action={action_clean} "
+        f"reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
 
-def log_end(success, steps, score, rewards):
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-    print(f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}", flush=True)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} "
+        f"score={score:.3f} rewards={rewards_str}",
+        flush=True,
+    )
 
-# ── HTTP ────────────────────────────────────────────────────
+# ── HTTP helpers ──────────────────────────────────────────────
 import urllib.request
+import urllib.error
 
-def _http_post(url, data):
-    body = json.dumps(data).encode()
-    req  = urllib.request.Request(
-        url, data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+def _http_post(url: str, data: dict) -> dict:
+    body    = json.dumps(data).encode()
+    req     = urllib.request.Request(
+        url,
+        data    = body,
+        headers = {"Content-Type": "application/json"},
+        method  = "POST",
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read())
 
-def _http_get(url):
+def _http_get(url: str) -> dict:
     req = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read())
 
-# ── Action helpers ───────────────────────────────────────────
-# These build dicts that exactly match the HintAction Pydantic model
-# in models.py so the /step endpoint never returns 422.
+# ── LLM agent ─────────────────────────────────────────────────
+SYSTEM_PROMPT = textwrap.dedent("""
+You are a WorkLens agent. A developer gives a short hint about work they did today.
+Your job: find the relevant artifacts and log each matching task as a SEPARATE LOG_ENTRY.
 
-def _make_task_entry(obs):
-    """Build a minimal valid TaskEntry from the observation."""
-    hint    = obs.get("user_hint", "work completed")
-    matches = obs.get("matches_found", [])
+STRICT RULES:
+1. Always SEARCH first — use the developer hint as the search term.
+2. After SEARCH: if 1 match → LOG_ENTRY. If 2-4 matches → SHOW_LIST. If 5+ → ASK_QUESTION first.
+3. After SHOW_LIST: the user has selected items. Log EACH selected item as a SEPARATE LOG_ENTRY call.
+   Do NOT search again. Do NOT show list again. Just LOG_ENTRY for each selected item one at a time.
+4. After ASK_QUESTION: call SHOW_LIST to present filtered results, then LOG_ENTRY each selected item.
+5. NEVER search twice. NEVER show list twice. NEVER log items user did not select.
+6. SKIP only if truly nothing matches.
+7. Each LOG_ENTRY must have: title, description (minimum 15 words explaining what was done),
+   start_time HH:MM (from file change timestamp), end_time HH:MM (from commit timestamp), source_ids.
 
-    if matches:
-        first  = matches[0]
-        title  = first.get("title", hint)
-        ts     = first.get("timestamp", "09:00")
-        src_ids = [first.get("id", "")]
-    else:
-        # Fall back to first git commit if present
-        commits = obs.get("git_commits", [])
-        if commits:
-            c      = commits[0]
-            title  = c.get("message", hint)
-            ts     = c.get("timestamp", "09:00")
-            src_ids = [c.get("commit_id", "")]
-        else:
-            title   = hint
-            ts      = "09:00"
-            src_ids = []
+IMPORTANT: If LAST RESULT says "User selected 2" items — you must call LOG_ENTRY TWICE, once per item.
+Check "ALREADY LOGGED" count vs total selected. Keep logging until all selected items are logged.
 
-    return {
-        "title":       title[:120],
-        "description": f"Completed: {hint}",
-        "start_time":  ts,
-        "end_time":    ts,
-        "source_ids":  src_ids,
-        "project":     None,
-        "tags":        [],
-    }
+Respond ONLY with valid JSON. No text outside JSON.
+
+Examples:
+{"action_type": "SEARCH", "hint": "updated SQL queries"}
+{"action_type": "SHOW_LIST"}
+{"action_type": "ASK_QUESTION", "question": "Was this frontend or backend work?"}
+{"action_type": "LOG_ENTRY", "task_entry": {"title": "Fix login timeout bug", "description": "Resolved session expiry issue in auth.py and session.py causing login timeouts after 30 minutes of inactivity.", "start_time": "11:20", "end_time": "11:35", "source_ids": ["abc123", "PROJ-88"], "project": "PROJ", "tags": ["bugfix", "auth"]}}
+{"action_type": "SKIP", "skip_reason": "No matching artifacts found for this hint."}
+""").strip()
 
 
-def _fallback_action(obs, step_in_episode):
-    """
-    Rule-based agent that follows the intended episode flow:
-      1. SEARCH  — send the hint, populate matches_found
-      2. SHOW_LIST or ASK_QUESTION — surface / narrow results
-      3. AUTO_LOG / LOG_ENTRY — commit the best match
-    """
-    match_count = obs.get("match_count", 0)
-    matches     = obs.get("matches_found", [])
+def get_llm_action(client: OpenAI, obs: dict, history: list) -> dict:
+    """Ask LLM what action to take given current observation."""
 
-    # ── Step 1: always search first ──────────────────────────
-    if step_in_episode == 1:
-        return {
-            "action_type": "SEARCH",
-            "hint":        obs.get("user_hint", ""),
-        }
-
-    # ── Step 2a: single clear match → AUTO_LOG ───────────────
-    if match_count == 1 and matches:
-        return {
-            "action_type": "AUTO_LOG",
-            "task_entry":  _make_task_entry(obs),
-        }
-
-    # ── Step 2b: multiple matches, step 2 → SHOW_LIST ────────
-    if match_count > 1 and step_in_episode == 2:
-        return {"action_type": "SHOW_LIST"}
-
-    # ── Step 3: still multiple, step 3 → ASK_QUESTION ────────
-    if match_count > 1 and step_in_episode == 3:
-        return {
-            "action_type": "ASK_QUESTION",
-            "question":    "Which specific task would you like me to log?",
-        }
-
-    # ── Step 4+: if we have matches, log best one ─────────────
-    if match_count >= 1:
-        return {
-            "action_type": "LOG_ENTRY",
-            "task_entry":  _make_task_entry(obs),
-        }
-
-    # ── Fallback: no matches found → SKIP ────────────────────
-    return {
-        "action_type": "SKIP",
-        "skip_reason": "No matching work items found for the given hint.",
-    }
-
-
-# ── LLM Agent ───────────────────────────────────────────────
-SYSTEM_PROMPT = """\
-You are a WorkLens agent. Given a developer's hint and their workday activity,
-decide the best next action.
-
-Respond ONLY with a valid JSON object — no prose, no markdown fences.
-
-Action types: SEARCH | AUTO_LOG | SHOW_LIST | ASK_QUESTION | MULTI_SELECT | GENERATE_DESC | LOG_ENTRY | SKIP
-
-Schema:
-{
-  "action_type": "<one of the above>",
-  "hint": "<string, used with SEARCH>",
-  "question": "<string, used with ASK_QUESTION>",
-  "selected_indices": [<ints>, used with SHOW_LIST/MULTI_SELECT],
-  "source_ids": ["<id>", used with GENERATE_DESC],
-  "task_entry": {
-    "title": "<str>", "description": "<str>",
-    "start_time": "<HH:MM>", "end_time": "<HH:MM>",
-    "source_ids": ["<id>"], "project": null, "tags": []
-  },
-  "skip_reason": "<string, used with SKIP>"
-}
-
-Only include fields relevant to the chosen action_type.
-"""
-
-
-def get_llm_action(client, obs, step_in_episode):
-    """Call the LLM; fall back to rule-based agent on any failure."""
-
-    if client is None:
-        return _fallback_action(obs, step_in_episode)
-
-    # Trim observation to avoid huge context — keep the essentials
-    obs_slim = {
-        "user_hint":    obs.get("user_hint"),
-        "match_count":  obs.get("match_count", 0),
-        "matches_found": obs.get("matches_found", [])[:5],
-        "step_count":   obs.get("step_count", 0),
-        "max_steps":    obs.get("max_steps", 10),
-        "last_action_result": obs.get("last_action_result"),
-        "error_message":      obs.get("error_message"),
-        "pending_question":   obs.get("pending_question"),
-        "user_answer":        obs.get("user_answer"),
-        "git_commits":        obs.get("git_commits", [])[:3],
-    }
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user",   "content": f"Observation:\n{json.dumps(obs_slim, indent=2)}\n\nWhat is your next action?"},
+    # Format observation as readable text
+    lines = [
+        f"HINT: \"{obs['user_hint']}\"",
+        f"STEP: {obs['step_count']}/{obs['max_steps']}",
+        f"DIFFICULTY: {obs['task_difficulty']}",
     ]
+    if obs.get("git_commits"):
+        lines.append("GIT COMMITS:")
+        for c in obs["git_commits"][:5]:
+            lines.append(f"  [{c['commit_id'][:8]}] {c['timestamp']} — {c['message']}")
+    if obs.get("jira_items"):
+        lines.append("JIRA:")
+        for j in obs["jira_items"][:3]:
+            lines.append(f"  [{j['ticket_id']}] {j['title']} ({j['status']})")
+    if obs.get("matches_found"):
+        lines.append(f"MATCHES ({obs['match_count']}):")
+        for i, m in enumerate(obs["matches_found"][:6]):
+            lines.append(f"  [{i}] {m['timestamp']} [{m['source_type'].upper()}] {m['title']}")
+            lines.append(f"       {m['summary']}")
+    if obs.get("pending_question"):
+        lines.append(f"YOU ASKED: \"{obs['pending_question']}\"")
+        lines.append(f"USER SAID: \"{obs['user_answer']}\"")
+    if obs.get("logged_entries"):
+        lines.append(f"ALREADY LOGGED: {len(obs['logged_entries'])} entries so far")
+    if obs.get("matches_found") and not obs.get("logged_entries"):
+        lines.append(f"ACTION NEEDED: Log each of the {len(obs['matches_found'])} selected item(s) with LOG_ENTRY")
+    if obs.get("matches_found") and obs.get("logged_entries"):
+        remaining = len(obs["matches_found"]) - len(obs["logged_entries"])
+        if remaining > 0:
+            lines.append(f"ACTION NEEDED: Still need to log {remaining} more item(s) with LOG_ENTRY")
+    if obs.get("last_action_result"):
+        lines.append(f"LAST RESULT: {obs['last_action_result']}")
+    if obs.get("error_message"):
+        lines.append(f"ERROR: {obs['error_message']}")
+
+    obs_text = "\n".join(lines)
+    history.append({"role": "user", "content": obs_text})
+
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history[-8:]
 
     try:
-        resp = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            temperature=0.0,
-            max_tokens=256,
+        resp  = client.chat.completions.create(
+            model       = MODEL_NAME,
+            messages    = messages,
+            temperature = 0.2,
+            max_tokens  = 512,
         )
         raw = (resp.choices[0].message.content or "").strip()
+        history.append({"role": "assistant", "content": raw})
 
-        # Strip markdown fences if present
-        if "```json" in raw:
-            raw = raw.split("```json")[1].split("```")[0].strip()
-        elif "```" in raw:
-            raw = raw.split("```")[1].split("```")[0].strip()
+        # Strip markdown fences
+        if raw.startswith("```"):
+            raw = "\n".join(raw.split("\n")[1:-1])
 
-        action = json.loads(raw)
-
-        # Validate action_type is present and is a known value
-        valid_types = {
-            "SEARCH", "AUTO_LOG", "SHOW_LIST", "ASK_QUESTION",
-            "MULTI_SELECT", "GENERATE_DESC", "LOG_ENTRY", "SKIP",
-        }
-        if action.get("action_type") not in valid_types:
-            raise ValueError(f"Unknown action_type: {action.get('action_type')}")
-
-        return action
+        return json.loads(raw)
 
     except Exception as e:
-        err_str = str(e)
-        # Credits exhausted — disable LLM silently for this call
-        if "402" in err_str or "credits" in err_str.lower():
-            print("[WARN] LLM credits exhausted — using rule-based fallback.", flush=True)
-        else:
-            print(f"[WARN] LLM failed: {e}", flush=True)
-
-        return _fallback_action(obs, step_in_episode)
+        # Fallback: if we have matches, show list; else search
+        if obs.get("match_count", 0) > 0:
+            return {"action_type": "SHOW_LIST"}
+        return {"action_type": "SEARCH", "hint": obs["user_hint"]}
 
 
-# ── Runner ──────────────────────────────────────────────────
-def run_task(client, task, base_url):
+def run_task(client: OpenAI, task: dict, base_url: str, model_name: str = None) -> dict:
+    global MODEL_NAME
+    if model_name:
+        MODEL_NAME = model_name
+    """
+    Run one complete task episode.
+    Returns dict with score, steps, rewards, success.
+    """
+    task_id    = task["id"]
+    difficulty = task["difficulty"]
+    seed       = task["seed"]
 
-    rewards      = []
-    steps_taken  = 0
-    score        = 0.0
-    success      = False
+    rewards     : List[float] = []
+    steps_taken : int         = 0
+    score       : float       = 0.0
+    success     : bool        = False
+    history     : list        = []
+    session_id  : str         = ""
 
-    log_start(task["id"], BENCHMARK, MODEL_NAME)
+    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
     try:
-        reset = _http_post(f"{base_url}/reset", {
-            "difficulty": task["difficulty"],
-            "seed":       task["seed"],
+        # Reset
+        reset_resp = _http_post(f"{base_url}/reset", {
+            "difficulty": difficulty,
+            "seed"      : seed,
         })
-
-        session_id = reset["session_id"]
-        obs        = reset["observation"]
+        session_id = reset_resp["session_id"]
+        obs        = reset_resp["observation"]
 
         for step in range(1, MAX_STEPS + 1):
+            if obs.get("episode_done", False):
+                break
 
-            action      = get_llm_action(client, obs, step)
-            action_type = action.get("action_type", "SEARCH")
+            # Get action from LLM
+            action_dict = get_llm_action(client, obs, history)
+            action_type = action_dict.get("action_type", "SKIP")
 
+            error_msg = None
             try:
-                res    = _http_post(f"{base_url}/step", {
+                step_resp = _http_post(f"{base_url}/step", {
                     "session_id": session_id,
-                    "action":     action,
+                    "action"    : action_dict,
                 })
-                obs    = res["observation"]
-                reward = float(res.get("reward", 0))
-                done   = bool(res.get("done", False))
+                obs    = step_resp["observation"]
+                reward = float(step_resp.get("reward", 0.0))
+                done   = bool(step_resp.get("done", False))
+                error_msg = obs.get("error_message")
 
             except Exception as e:
-                print(f"[WARN] /step failed at step {step}: {e}", flush=True)
-                reward = 0.0
-                done   = True
+                reward    = 0.0
+                done      = True
+                error_msg = str(e)
 
             rewards.append(reward)
             steps_taken = step
 
-            log_step(step, action_type, reward, done, None)
+            log_step(
+                step   = step,
+                action = action_type,
+                reward = reward,
+                done   = done,
+                error  = error_msg,
+            )
 
             if done:
                 break
 
-        # Fetch final score from state endpoint
+        # Get final score from state
         try:
-            state = _http_get(f"{base_url}/state/{session_id}")
-            score = float(state["state"].get("current_score", 0))
+            state_resp = _http_get(f"{base_url}/state/{session_id}")
+            score = float(state_resp["state"].get("current_score", 0.0))
         except Exception:
-            score = max(rewards) if rewards else 0.0
+            score = rewards[-1] if rewards else 0.0
 
+        # Clamp to [0, 1]
+        score   = min(max(score, 0.0), 1.0)
         success = score >= SUCCESS_THRESHOLD
 
     except Exception as e:
-        log_step(0, "ERROR", 0.0, True, str(e))
+        error_str = str(e)
+        log_step(step=steps_taken + 1, action="ERROR", reward=0.0, done=True, error=error_str)
 
-    log_end(success, steps_taken, score, rewards)
-    return score
+    finally:
+        log_end(
+            success = success,
+            steps   = steps_taken,
+            score   = score,
+            rewards = rewards,
+        )
+
+    return {
+        "task_id" : task_id,
+        "score"   : score,
+        "steps"   : steps_taken,
+        "rewards" : rewards,
+        "success" : success,
+    }
 
 
-# ── Main ────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────
 def main():
+    # Read fresh from environment at runtime (validator injects these)
+    api_key      = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN")
+    api_base_url = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
+    model_name   = os.environ.get("MODEL_NAME",   "meta-llama/Llama-3.3-70B-Instruct")
+    space_url    = os.environ.get("SPACE_URL",     "http://localhost:7860")
 
-    # Safe client creation — wrapped so it NEVER crashes the script
-    client = None
-    if API_KEY:
-        try:
-            client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-            print(f"[INFO] LLM client initialized: {API_BASE_URL}", flush=True)
-        except Exception as e:
-            print(f"[WARN] OpenAI client init failed, running without LLM: {e}", flush=True)
-            client = None
+    if not api_key:
+        print("[ERROR] API_KEY not set.", flush=True)
+        sys.exit(1)
 
-    base_url = SPACE_URL.rstrip("/")
+    print(f"[INFO] Using API_BASE_URL={api_base_url}", flush=True)
+    print(f"[INFO] Using MODEL_NAME={model_name}", flush=True)
 
-    # Health check (non-fatal)
+    # Always initialize with env vars — never hardcode
+    client   = OpenAI(base_url=api_base_url, api_key=api_key)
+    base_url = space_url.rstrip("/")
+
+    # Update global MODEL_NAME for log_start
+    global MODEL_NAME
+    MODEL_NAME = model_name
+
+    # Verify server is alive
     try:
-        _http_get(f"{base_url}/health")
-        print(f"[INFO] Health check passed: {base_url}", flush=True)
+        health = _http_get(f"{base_url}/health")
+        assert health.get("status") == "healthy"
     except Exception as e:
-        print(f"[WARN] Health check failed: {e}", flush=True)
+        print(f"[ERROR] Server not reachable at {base_url}: {e}", flush=True)
+        sys.exit(1)
 
-    scores = []
+    all_results = []
     for task in TASKS:
-        try:
-            s = run_task(client, task, base_url)
-        except Exception as e:
-            print(f"[ERROR] Task {task['id']} crashed: {e}", flush=True)
-            s = 0.0
-        scores.append(s)
-        print()
+        result = run_task(client, task, base_url, model_name=model_name)
+        all_results.append(result)
+        print(flush=True)  # blank line between tasks
 
-    avg = sum(scores) / len(scores) if scores else 0.0
+    # Final summary to stderr (doesn't interfere with stdout format)
+    avg = sum(r["score"] for r in all_results) / len(all_results)
     print(f"# Average score: {avg:.3f}", file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"[FATAL] Unhandled exception: {e}", flush=True)
-        sys.exit(0)   # exit 0 so the validator never sees a crash
+    main()
