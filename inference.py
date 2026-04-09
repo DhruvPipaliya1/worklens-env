@@ -48,7 +48,7 @@ _load_env()
 
 # ── Config ────────────────────────────────────────────────────
 # Use exactly the variable names the validator injects
-API_KEY      = os.environ.get("API_KEY")
+API_KEY      = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN")
 API_BASE_URL = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME   = os.environ.get("MODEL_NAME",   "meta-llama/Llama-3.3-70B-Instruct")
 SPACE_URL    = os.environ.get("SPACE_URL",    "http://localhost:7860")
@@ -181,7 +181,7 @@ def get_llm_action(client: OpenAI, obs: dict, history: list) -> dict:
 
     try:
         resp  = client.chat.completions.create(
-            model       = MODEL_NAME,
+            model       = globals().get("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct"),
             messages    = messages,
             temperature = 0.2,
             max_tokens  = 512,
@@ -308,17 +308,27 @@ def main():
     api_key      = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN")
     api_base_url = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
     model_name   = os.environ.get("MODEL_NAME",   "meta-llama/Llama-3.3-70B-Instruct")
-    space_url    = os.environ.get("SPACE_URL",     "http://localhost:7860")
+    # Validator injects SPACE_URL pointing to the deployed HF Space
+    # Fall back to constructing it from HF_SPACE_* env vars that HF injects automatically
+    hf_space_host = os.environ.get("SPACE_HOST", "")
+    default_url   = f"https://{hf_space_host}" if hf_space_host else "http://localhost:7860"
+    space_url     = os.environ.get("SPACE_URL", default_url)
 
+    # If no key found use a placeholder — OpenAI client requires non-empty string
+    # The validator injects API_KEY at runtime
     if not api_key:
-        print("[ERROR] API_KEY not set.", flush=True)
-        sys.exit(1)
+        api_key = "placeholder-key"
+        print("[WARN] API_KEY not set — using placeholder. Validator should inject this.", flush=True)
 
     print(f"[INFO] Using API_BASE_URL={api_base_url}", flush=True)
     print(f"[INFO] Using MODEL_NAME={model_name}", flush=True)
+    print(f"[INFO] API_KEY present={bool(api_key and api_key != 'placeholder-key')}", flush=True)
 
-    # Always initialize with env vars — never hardcode
-    client   = OpenAI(base_url=api_base_url, api_key=api_key)
+    try:
+        client = OpenAI(base_url=api_base_url, api_key=api_key)
+    except Exception as e:
+        print(f"[ERROR] Failed to initialize OpenAI client: {e}", flush=True)
+        sys.exit(1)
     base_url = space_url.rstrip("/")
 
     # Update global MODEL_NAME for log_start
