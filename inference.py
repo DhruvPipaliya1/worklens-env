@@ -38,7 +38,7 @@ def _load_env():
 _load_env()
 
 # ── Config ──────────────────────────────────────────────────
-API_KEY      = os.getenv("API_KEY") or os.getenv("HF_TOKEN")
+API_KEY      = os.getenv("API_KEY")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME   = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
 SPACE_URL    = os.getenv("SPACE_URL", "http://localhost:7860")
