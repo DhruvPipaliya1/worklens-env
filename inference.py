@@ -50,7 +50,7 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}", flush=True)
 
-# ── HTTP helpers (for env server only) ────────────────────────
+# ── HTTP helpers ───────────────────────────────────────────────
 def http_post(url: str, data: dict) -> dict:
     body = json.dumps(data).encode()
     req  = urllib.request.Request(
@@ -214,7 +214,7 @@ def get_action(client: OpenAI, model_name: str,
     except Exception as e:
         err_str = str(e)
         if "402" in err_str or "credits" in err_str.lower():
-            print("[WARN] LLM credits exhausted — using fallback for this step.", flush=True)
+            print("[WARN] LLM credits exhausted — using fallback.", flush=True)
         else:
             print(f"[WARN] LLM call failed: {e}", flush=True)
         return fallback_action(obs, step_in_episode)
@@ -233,6 +233,7 @@ def run_task(client: OpenAI, model_name: str, task: dict, base_url: str) -> floa
     history    : list        = []
     session_id : str         = ""
 
+    # Print [START] IMMEDIATELY — before any network calls
     log_start(task=task_id, env=BENCHMARK, model=model_name)
 
     try:
@@ -282,9 +283,11 @@ def run_task(client: OpenAI, model_name: str, task: dict, base_url: str) -> floa
         success = score >= SUCCESS_THRESHOLD
 
     except Exception as e:
-        log_step(step=steps_taken + 1, action="ERROR", reward=0.0, done=True, error=str(e)[:100])
+        # Even on total failure, emit a STEP so validator sees output
+        log_step(step=1, action="ERROR", reward=0.0, done=True, error=str(e)[:120])
 
     finally:
+        # [END] always prints no matter what
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
     return score
@@ -292,12 +295,10 @@ def run_task(client: OpenAI, model_name: str, task: dict, base_url: str) -> floa
 
 # ── Main ───────────────────────────────────────────────────────
 def main():
-    # Re-read at runtime in case validator injects after module load
     api_key      = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
     api_base_url = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
     model_name   = os.getenv("MODEL_NAME")   or "meta-llama/Llama-3.3-70B-Instruct"
 
-    # SPACE_URL with SPACE_HOST fallback (HF auto-injects SPACE_HOST)
     space_host = os.getenv("SPACE_HOST", "")
     base_url   = (
         os.getenv("SPACE_URL")
@@ -313,25 +314,21 @@ def main():
     client = OpenAI(base_url=api_base_url, api_key=api_key or "no-key")
     print("[INFO] OpenAI client initialized.", flush=True)
 
-    # Health check with retry — HF Spaces can be slow to start
-    for attempt in range(5):
-        try:
-            health = http_get(f"{base_url}/health")
-            print(f"[INFO] Server health={health.get('status', 'unknown')}", flush=True)
-            break
-        except Exception as e:
-            print(f"[WARN] Health check attempt {attempt+1}/5 failed: {e}", flush=True)
-            if attempt < 4:
-                time.sleep(3)
-    # Never sys.exit — always proceed to tasks regardless of health check
+    # Health check — single attempt, non-fatal, no sleep
+    try:
+        health = http_get(f"{base_url}/health")
+        print(f"[INFO] Server health={health.get('status', 'unknown')}", flush=True)
+    except Exception as e:
+        print(f"[WARN] Health check failed: {e} — continuing anyway", flush=True)
 
+    # Run tasks — [START] prints inside run_task before any network calls
     scores = []
     for task in TASKS:
         try:
             s = run_task(client, model_name, task, base_url)
             scores.append(s)
         except Exception as e:
-            print(f"[ERROR] Task {task['id']} failed: {e}", flush=True)
+            print(f"[ERROR] Task {task['id']} crashed: {e}", flush=True)
             log_end(False, 0, 0.0, [])
             scores.append(0.0)
         print(flush=True)
