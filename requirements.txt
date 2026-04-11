@@ -2,6 +2,6 @@ fastapi==0.115.0
 uvicorn==0.30.6
 pydantic==2.7.4
 requests==2.32.3
-openai==1.40.0
+openai>=1.0.0
 huggingface-hub==0.24.0
 openenv-core
