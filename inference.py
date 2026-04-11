@@ -4,7 +4,7 @@ WorkLens Environment — inference.py
 Baseline inference script.
 
 Required env vars (injected by validator):
-    HF_TOKEN      Your Hugging Face / API key  (validator injects this)
+    HF_TOKEN      Your Hugging Face / API key
     API_BASE_URL  LLM endpoint
     MODEL_NAME    Model identifier
     SPACE_URL     HF Space URL
@@ -19,11 +19,11 @@ from typing import List, Optional
 
 from openai import OpenAI
 
-# ── Config — read directly from environment, no .env loading ──
-# API_KEY      = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
-# API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
-# MODEL_NAME   = os.getenv("MODEL_NAME")   or "meta-llama/Llama-3.3-70B-Instruct"
-# SPACE_URL    = os.getenv("SPACE_URL")    or "http://localhost:7860"
+# ── Module-level config — exactly as hackathon sample requires ─
+API_KEY      = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
+MODEL_NAME   = os.getenv("MODEL_NAME")   or "meta-llama/Llama-3.3-70B-Instruct"
+SPACE_URL    = os.getenv("SPACE_URL")    or "http://localhost:7860"
 
 BENCHMARK         = "worklens-env"
 MAX_STEPS         = 10
@@ -291,8 +291,8 @@ def run_task(client: OpenAI, model_name: str, task: dict, base_url: str) -> floa
 
 # ── Main ───────────────────────────────────────────────────────
 def main():
-    # Read env vars exactly as the hackathon sample requires — HF_TOKEN first
-    api_key = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN")
+    # Re-read at runtime in case validator injects after module load
+    api_key      = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
     api_base_url = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
     model_name   = os.getenv("MODEL_NAME")   or "meta-llama/Llama-3.3-70B-Instruct"
 
@@ -308,20 +308,9 @@ def main():
     print(f"[INFO] SPACE_URL={base_url}", flush=True)
     print(f"[INFO] API_KEY set={bool(api_key)}", flush=True)
 
-    # Build OpenAI client — exactly as the hackathon sample requires
-    client = None
-    try:
-        if not api_key:
-            print("[WARN] No API key found — will use fallback agent only.", flush=True)
-            client = None
-        else:
-            client = OpenAI(
-                base_url = api_base_url,
-                api_key  = api_key,  # real key only, never a placeholder
-            )
-            print("[INFO] OpenAI client initialized.", flush=True)
-    except Exception as e:
-        print(f"[WARN] OpenAI client init failed: {e}", flush=True)
+    # Always create client unconditionally — exactly like the hackathon sample
+    client = OpenAI(base_url=api_base_url, api_key=api_key or "no-key")
+    print("[INFO] OpenAI client initialized.", flush=True)
 
     # Verify env server is reachable
     try:

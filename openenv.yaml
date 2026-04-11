@@ -14,7 +14,7 @@ type: environment
 
 runtime:
   type: docker
-  dockerfile: server/Dockerfile
+  dockerfile: Dockerfile
 
 app:
   port: 7860
@@ -205,7 +205,7 @@ environment_variables:
 
   - name: API_KEY
     description: API key for LLM inference
-    required: false
+    required: true
 
   - name: MODEL_NAME
     description: LLM model identifier

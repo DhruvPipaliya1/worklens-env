@@ -9,8 +9,8 @@ ENV HOME=/home/user \
 # Set working directory
 WORKDIR /home/user/app
 
-# Install dependencies
-COPY --chown=user server/requirements.txt requirements.txt
+# Install dependencies — use root requirements.txt (not server/)
+COPY --chown=user requirements.txt requirements.txt
 RUN pip install --no-cache-dir --user -r requirements.txt
 
 # Copy entire project
