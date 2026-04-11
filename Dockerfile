@@ -28,4 +28,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:7860/health')"
 
 # Run the server
-CMD ["bash", "-c", "python -m uvicorn worklens_env.server.app:app --host 0.0.0.0 --port 7860 & sleep 2 && python worklens_env/inference.py"]
+CMD ["bash", "-c", "python -m uvicorn worklens_env.server.app:app --host 0.0.0.0 --port 7860 & until curl -s http://localhost:7860/health; do sleep 1; done && python worklens_env/inference.py"]
