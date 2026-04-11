@@ -13,6 +13,7 @@ Required env vars (injected by validator):
 import json
 import os
 import sys
+import time
 import textwrap
 import urllib.request
 from typing import List, Optional
@@ -312,13 +313,17 @@ def main():
     client = OpenAI(base_url=api_base_url, api_key=api_key or "no-key")
     print("[INFO] OpenAI client initialized.", flush=True)
 
-    # Verify env server is reachable
-    try:
-        health = http_get(f"{base_url}/health")
-        print(f"[INFO] Server health={health.get('status', 'unknown')}", flush=True)
-    except Exception as e:
-        print(f"[ERROR] Server not reachable at {base_url}: {e}", flush=True)
-        sys.exit(1)
+    # Health check with retry — HF Spaces can be slow to start
+    for attempt in range(5):
+        try:
+            health = http_get(f"{base_url}/health")
+            print(f"[INFO] Server health={health.get('status', 'unknown')}", flush=True)
+            break
+        except Exception as e:
+            print(f"[WARN] Health check attempt {attempt+1}/5 failed: {e}", flush=True)
+            if attempt < 4:
+                time.sleep(3)
+    # Never sys.exit — always proceed to tasks regardless of health check
 
     scores = []
     for task in TASKS:
